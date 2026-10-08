@@ -3,23 +3,14 @@ package httpman.http;
 import httpman.model.Header;
 import httpman.model.RequestModel;
 
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509ExtendedTrustManager;
+import javax.net.ssl.*;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.net.Authenticator;
-import java.net.InetSocketAddress;
-import java.net.PasswordAuthentication;
-import java.net.ProxySelector;
-import java.net.URI;
+import java.net.*;
 import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpHeaders;
@@ -31,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
@@ -227,7 +219,9 @@ public class HttpExecutor {
 
         // ---- TLS
         boolean hasCert = req.certPath != null && !req.certPath.isBlank();
-        if (hasCert || req.insecure) {
+        String tlsVersion = req.tlsVersion == null ? "" : req.tlsVersion.trim();
+        boolean forceTls = !tlsVersion.isEmpty();
+        if (hasCert || req.insecure || forceTls) {
             KeyManager[] kms = null;
             if (hasCert) {
                 KeyStore ks = loadKeyStore(req.certPath, req.certPassword);
@@ -240,14 +234,102 @@ public class HttpExecutor {
             SSLContext ctx = SSLContext.getInstance("TLS");
             ctx.init(kms, tms, null);
             b.sslContext(ctx);
+            if (forceTls) {
+                if (!java.util.List.of(ctx.getSupportedSSLParameters().getProtocols()).contains(tlsVersion)) {
+                    throw new IllegalArgumentException("TLS version " + tlsVersion + " is not supported by this JVM");
+                }
+                SSLParameters params = new SSLParameters();
+                params.setProtocols(new String[]{tlsVersion}); // offer only this version
+                b.sslParameters(params);
+            }
         }
         if (req.insecure) {
             res.log("TLS        : certificate and hostname verification DISABLED");
         }
+        res.log("TLS version: " + (forceTls ? tlsVersion + " (forced)" : "negotiated"));
+
+        // ---- host override: the URL is untouched, only the DNS answer for its host changes
+        String urlHost = parseUri(req.url).getHost();
+        String overrideHost = req.hostOverride == null ? "" : req.hostOverride.trim();
+        if (urlHost != null) {
+            OverrideResolverProvider.set(urlHost, overrideHost); // empty => removes any previous override
+        }
+        if (!overrideHost.isEmpty()) {
+            if (urlHost == null) {
+                throw new IllegalArgumentException("Cannot apply a host override: the URL has no host");
+            }
+            res.log("Override   : " + urlHost + " -> " + overrideHost
+                    + (req.proxyMode == RequestModel.ProxyMode.NONE ? "" : " (ignored if the request goes through a proxy)"));
+        } else {
+            res.log("Override   : none (OS DNS)");
+        }
+
         res.log("Timeout    : " + (req.timeoutSeconds > 0 ? req.timeoutSeconds + " s" : "none"));
         res.log("Redirects  : " + (req.followRedirects ? "follow" : "do not follow"));
         res.log("HTTP ver.  : " + req.httpVersion);
         return b.build();
+    }
+
+    // ------------------------------------------------------------------ host override helpers
+
+    /**
+     * Returns the URI to actually connect to: same as {@code uri} but with the host replaced by the override
+     * (or {@code uri} unchanged when no override is set). Use it when building the HttpRequest, and also call
+     * {@link #hostHeaderFor} to set the original Host header.
+     */
+    static URI applyHostOverride(URI uri, RequestModel req) throws URISyntaxException {
+        String o = req.hostOverride == null ? "" : req.hostOverride.trim();
+        if (o.isEmpty() || uri.getHost() == null) {
+            return uri;
+        }
+        if (o.indexOf(':') >= 0 && !o.startsWith("[")) {
+            o = "[" + o + "]"; // IPv6 literal
+        }
+        return new URI(uri.getScheme(), uri.getUserInfo(), o, uri.getPort(),
+                uri.getRawPath(), uri.getRawQuery(), uri.getRawFragment());
+    }
+
+    /** Value for the Host header of the original URL (host[:port], port only when explicit), or null if no override. */
+    static String hostHeaderFor(URI original, RequestModel req) {
+        if (req.hostOverride == null || req.hostOverride.isBlank() || original.getHost() == null) {
+            return null;
+        }
+        String h = original.getHost();
+        return original.getPort() == -1 ? h : h + ":" + original.getPort();
+    }
+
+    private static boolean isIpLiteral(String host) {
+        return host.indexOf(':') >= 0 || host.matches("\\d{1,3}(\\.\\d{1,3}){3}");
+    }
+
+    /**
+     * SSLContext wrapper that tells the JSSE engine the peer is {@code peerHost} (the original host name),
+     * whatever address the HttpClient connected to, so the certificate is validated against the right name.
+     */
+    private static final class PeerHostSslContext extends SSLContext {
+        PeerHostSslContext(SSLContext delegate, String peerHost) {
+            super(new Spi(delegate, peerHost), delegate.getProvider(), delegate.getProtocol());
+        }
+
+        private static final class Spi extends SSLContextSpi {
+            private final SSLContext d;
+            private final String peerHost;
+
+            Spi(SSLContext d, String peerHost) {
+                this.d = d;
+                this.peerHost = peerHost;
+            }
+
+            @Override protected void engineInit(KeyManager[] km, TrustManager[] tm, SecureRandom sr) { }
+            @Override protected SSLSocketFactory engineGetSocketFactory() { return d.getSocketFactory(); }
+            @Override protected SSLServerSocketFactory engineGetServerSocketFactory() { return d.getServerSocketFactory(); }
+            @Override protected SSLEngine engineCreateSSLEngine() { return d.createSSLEngine(peerHost, -1); }
+            @Override protected SSLEngine engineCreateSSLEngine(String host, int port) { return d.createSSLEngine(peerHost, port); }
+            @Override protected SSLSessionContext engineGetServerSessionContext() { return d.getServerSessionContext(); }
+            @Override protected SSLSessionContext engineGetClientSessionContext() { return d.getClientSessionContext(); }
+            @Override protected SSLParameters engineGetDefaultSSLParameters() { return d.getDefaultSSLParameters(); }
+            @Override protected SSLParameters engineGetSupportedSSLParameters() { return d.getSupportedSSLParameters(); }
+        }
     }
 
     /** Headers really sent (user headers + body Content-Type), without Host / User-Agent / Content-Length logic. */

@@ -12,7 +12,7 @@
     <description>Small Postman / Bruno like HTTP client in plain Java + Swing (no dependencies)</description>
 
     <properties>
-        <maven.compiler.release>11</maven.compiler.release>
+        <maven.compiler.release>18</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
@@ -26,7 +26,7 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
                 <configuration>
-                    <release>11</release>
+                    <release>18</release>
                 </configuration>
             </plugin>
             <plugin>

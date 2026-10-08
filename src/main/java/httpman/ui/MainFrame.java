@@ -71,6 +71,9 @@ import java.util.Locale;
 public class MainFrame extends JFrame {
 
     private static final String[] METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"};
+    /** Labels shown in the "TLS version" combo and the matching JSSE protocol names ("" = JVM default / negotiated). */
+    private static final String[] TLS_LABELS = {"Default (negotiated)", "TLS 1.0", "TLS 1.1", "TLS 1.2", "TLS 1.3"};
+    private static final String[] TLS_VALUES = {"", "TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3"};
 
     private final RequestStore store;
     private final HttpExecutor executor = new HttpExecutor();
@@ -109,6 +112,8 @@ public class MainFrame extends JFrame {
     private final JCheckBox followRedirectsBox = new JCheckBox("Follow redirects");
     private final JCheckBox insecureBox = new JCheckBox("Disable TLS certificate verification (insecure)");
     private final JComboBox<RequestModel.HttpVersion> httpVersionCombo = new JComboBox<>(RequestModel.HttpVersion.values());
+    private final JComboBox<String> tlsVersionCombo = new JComboBox<>(TLS_LABELS);
+    private final JTextField hostOverrideField = new JTextField(24);
     private final JRadioButton proxyNone = new JRadioButton("No proxy");
     private final JRadioButton proxySystem = new JRadioButton("System proxy");
     private final JRadioButton proxyCustom = new JRadioButton("Custom proxy");
@@ -568,6 +573,24 @@ public class MainFrame extends JFrame {
 
         c.gridy++;
         c.gridx = 0;
+        p.add(new JLabel("TLS version"), c);
+        c.gridx = 1;
+        tlsVersionCombo.setToolTipText("Force the TLS protocol version used for https URLs (only this version is offered)."
+                + " TLS 1.0 / 1.1 may also have to be re-enabled in the JVM (jdk.tls.disabledAlgorithms).");
+        p.add(tlsVersionCombo, c);
+
+        c.gridy++;
+        c.gridx = 0;
+        p.add(new JLabel("Override host"), c);
+        c.gridx = 1;
+        c.gridwidth = 2;
+        hostOverrideField.setToolTipText("IP address (or host name) to connect to instead of resolving the URL's host."
+                + " Empty = use the OS DNS. The Host header and TLS SNI still use the URL's host.");
+        p.add(hostOverrideField, c);
+        c.gridwidth = 1;
+
+        c.gridy++;
+        c.gridx = 0;
         c.gridwidth = 3;
         p.add(followRedirectsBox, c);
         c.gridy++;
@@ -710,6 +733,8 @@ public class MainFrame extends JFrame {
         followRedirectsBox.setSelected(r.followRedirects);
         insecureBox.setSelected(r.insecure);
         httpVersionCombo.setSelectedItem(r.httpVersion);
+        tlsVersionCombo.setSelectedIndex(tlsIndex(r.tlsVersion));
+        hostOverrideField.setText(r.hostOverride == null ? "" : r.hostOverride);
         switch (r.proxyMode) {
             case NONE: proxyNone.setSelected(true); break;
             case CUSTOM: proxyCustom.setSelected(true); break;
@@ -756,6 +781,8 @@ public class MainFrame extends JFrame {
         r.followRedirects = followRedirectsBox.isSelected();
         r.insecure = insecureBox.isSelected();
         r.httpVersion = (RequestModel.HttpVersion) httpVersionCombo.getSelectedItem();
+        r.tlsVersion = TLS_VALUES[Math.max(0, tlsVersionCombo.getSelectedIndex())];
+        r.hostOverride = hostOverrideField.getText().trim();
         r.proxyMode = proxyNone.isSelected() ? RequestModel.ProxyMode.NONE
                 : proxyCustom.isSelected() ? RequestModel.ProxyMode.CUSTOM : RequestModel.ProxyMode.SYSTEM;
         r.proxyHost = proxyHostField.getText().trim();
@@ -855,7 +882,9 @@ public class MainFrame extends JFrame {
         if (!confirmDiscard()) {
             return;
         }
-        loadEditor(new RequestModel());
+        RequestModel requestModel = new RequestModel();
+        requestModel.insecure = true;
+        loadEditor(requestModel);
         refreshList(null);
         nameField.requestFocusInWindow();
         nameField.selectAll();
@@ -1134,6 +1163,15 @@ public class MainFrame extends JFrame {
     }
 
     // ================================================================== small helpers
+
+    private static int tlsIndex(String value) {
+        for (int i = 0; i < TLS_VALUES.length; i++) {
+            if (TLS_VALUES[i].equalsIgnoreCase(value == null ? "" : value.trim())) {
+                return i;
+            }
+        }
+        return 0;
+    }
 
     private void updateProxyFields() {
         boolean custom = proxyCustom.isSelected();

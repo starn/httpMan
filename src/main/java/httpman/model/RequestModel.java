@@ -13,6 +13,9 @@ public class RequestModel {
 
     public enum HttpVersion { AUTO, HTTP_1_1, HTTP_2 }
 
+    public String tlsVersion = "";
+    public String hostOverride = "";
+
     public enum BodyType {
         NONE("none"), RAW("raw (text / JSON / XML…)"), FORM_URLENCODED("x-www-form-urlencoded"),
         MULTIPART("form-data (multipart)"), BINARY("binary file");
@@ -47,7 +50,7 @@ public class RequestModel {
     public String certPassword = "";
 
     // settings
-    public int timeoutSeconds = 30;
+    public int timeoutSeconds = 15;
     public boolean followRedirects = true;
     public boolean insecure = false;
     public HttpVersion httpVersion = HttpVersion.HTTP_1_1;
