@@ -3,6 +3,7 @@ package httpman.ui;
 import httpman.curl.CurlConverter;
 import httpman.http.ExecutionResult;
 import httpman.http.HttpExecutor;
+import httpman.model.FolderModel;
 import httpman.model.Header;
 import httpman.model.RequestModel;
 import httpman.store.RequestStore;
@@ -11,8 +12,6 @@ import httpman.util.Json;
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
 import javax.swing.ButtonGroup;
-import javax.swing.DefaultListCellRenderer;
-import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
@@ -20,7 +19,6 @@ import javax.swing.JComponent;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
-import javax.swing.JList;
 import javax.swing.JMenu;
 import javax.swing.JMenuBar;
 import javax.swing.JMenuItem;
@@ -80,14 +78,23 @@ public class MainFrame extends JFrame {
 
     // ---- left panel
     private final JTextField filterField = new JTextField();
-    private final DefaultListModel<RequestModel> listModel = new DefaultListModel<>();
-    private final JList<RequestModel> requestList = new JList<>(listModel);
-    private boolean ignoreSelection;
+    private RequestTree requestTree;
 
     // ---- request line
     private final JTextField nameField = new JTextField();
     private final JComboBox<String> methodCombo = new JComboBox<>(METHODS);
-    private final JTextField urlField = new JTextField();
+    /** URL field; pasting a "curl ..." command into it imports the command instead of inserting the text. */
+    private final JTextField urlField = new JTextField() {
+        @Override
+        public void paste() {
+            String clip = clipboardText();
+            if (clip != null && looksLikeCurl(clip)) {
+                importCurlFromUrlField(clip);
+            } else {
+                super.paste();
+            }
+        }
+    };
     private final JButton sendButton = new JButton("Send");
     private final JButton saveButton = new JButton("Save");
     private final JButton revertButton = new JButton("Revert");
@@ -129,6 +136,8 @@ public class MainFrame extends JFrame {
 
     // ---- state
     private String currentId;
+    /** Folder of the request being edited (kept for requests not saved yet; saved ones keep the store's value). */
+    private String editorFolderId = "";
     private String savedSnapshot = "";
     private HttpExecutor.Execution running;
 
@@ -156,8 +165,9 @@ public class MainFrame extends JFrame {
         setLocationByPlatform(true);
 
         refreshList(null);
-        if (!listModel.isEmpty()) {
-            RequestModel first = listModel.get(0);
+        List<RequestModel> initial = requestTree.requestsInOrder();
+        if (!initial.isEmpty()) {
+            RequestModel first = initial.get(0);
             loadEditor(first);
             refreshList(first.id);
         } else {
@@ -181,20 +191,23 @@ public class MainFrame extends JFrame {
         filterField.getDocument().addDocumentListener(onChange(() -> refreshList(currentId)));
         p.add(top, BorderLayout.NORTH);
 
-        requestList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        requestList.setCellRenderer(new RequestRenderer());
-        requestList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting() && !ignoreSelection) {
-                onListSelection();
-            }
-        });
-        JPopupMenu popup = new JPopupMenu();
-        popup.add(item("Revert to last save", this::revertRequest));
-        popup.add(item("Duplicate", this::duplicateRequest));
-        popup.add(item("Copy as cURL", this::copyAsCurl));
-        popup.addSeparator();
-        popup.add(item("Delete", this::deleteRequest));
-        requestList.addMouseListener(new MouseAdapter() {
+        requestTree = new RequestTree(store, r -> onRequestSelected(r), () -> refreshList(currentId), ex -> error("Folder error", ex));
+        JPopupMenu requestPopup = new JPopupMenu();
+        requestPopup.add(item("Revert to last save", this::revertRequest));
+        requestPopup.add(item("Duplicate", this::duplicateRequest));
+        requestPopup.add(item("Copy as cURL", this::copyAsCurl));
+        requestPopup.addSeparator();
+        requestPopup.add(item("Delete", this::deleteRequest));
+        JPopupMenu folderPopup = new JPopupMenu();
+        folderPopup.add(item("New request in folder", this::newRequest));
+        folderPopup.add(item("New sub-folder…", this::newFolder));
+        folderPopup.add(item("Rename…", this::renameFolder));
+        folderPopup.addSeparator();
+        folderPopup.add(item("Delete folder", this::deleteRequest));
+        JPopupMenu emptyPopup = new JPopupMenu();
+        emptyPopup.add(item("New request", this::newRequest));
+        emptyPopup.add(item("New folder…", this::newFolder));
+        requestTree.addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
                 maybePopup(e);
@@ -206,25 +219,29 @@ public class MainFrame extends JFrame {
             }
 
             private void maybePopup(MouseEvent e) {
-                if (e.isPopupTrigger()) {
-                    int idx = requestList.locationToIndex(e.getPoint());
-                    if (idx >= 0 && idx != requestList.getSelectedIndex()) {
-                        requestList.setSelectedIndex(idx);
-                    }
-                    if (idx >= 0) {
-                        popup.show(requestList, e.getX(), e.getY());
-                    }
+                if (!e.isPopupTrigger()) {
+                    return;
+                }
+                Object o = requestTree.selectRowAt(e.getX(), e.getY());
+                if (o instanceof RequestModel) {
+                    requestPopup.show(requestTree, e.getX(), e.getY());
+                } else if (o instanceof FolderModel) {
+                    folderPopup.show(requestTree, e.getX(), e.getY());
+                } else {
+                    emptyPopup.show(requestTree, e.getX(), e.getY());
                 }
             }
         });
-        p.add(new JScrollPane(requestList), BorderLayout.CENTER);
+        p.add(new JScrollPane(requestTree), BorderLayout.CENTER);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        buttons.add(button("New", "New request", this::newRequest));
+        buttons.add(button("New", "New request (in the selected folder)", this::newRequest));
+        buttons.add(button("Folder", "New folder (inside the selected folder)", this::newFolder));
         buttons.add(button("Duplicate", "Duplicate the selected request", this::duplicateRequest));
-        buttons.add(button("Delete", "Delete the selected request", this::deleteRequest));
+        buttons.add(button("Delete", "Delete the selected request or folder", this::deleteRequest));
         p.add(buttons, BorderLayout.SOUTH);
         p.setMinimumSize(new Dimension(180, 100));
+        requestTree.setToolTipText("Drag requests and folders to reorder them or to move them into a folder");
         return p;
     }
 
@@ -716,6 +733,7 @@ public class MainFrame extends JFrame {
 
     private void loadEditor(RequestModel r) {
         currentId = r.id;
+        editorFolderId = r.folderId == null ? "" : r.folderId;
         nameField.setText(r.name);
         methodCombo.setSelectedItem(r.method);
         urlField.setText(r.url);
@@ -757,6 +775,7 @@ public class MainFrame extends JFrame {
         commitSpinner(proxyPortSpinner);
         RequestModel r = new RequestModel();
         r.id = currentId;
+        r.folderId = editorFolderId;
         r.name = nameField.getText().trim();
         Object m = methodCombo.getEditor().getItem();
         r.method = (m == null ? "GET" : m.toString().trim().toUpperCase(Locale.ROOT));
@@ -793,7 +812,10 @@ public class MainFrame extends JFrame {
     }
 
     private static String snapshot(RequestModel r) {
-        return Json.write(r.toMap());
+        // the folder is managed by the tree (drag and drop), moving a request must not make it "modified"
+        java.util.Map<String, Object> m = r.toMap();
+        m.remove("folderId");
+        return Json.write(m);
     }
 
     private boolean isDirty() {
@@ -819,35 +841,12 @@ public class MainFrame extends JFrame {
     // ================================================================== list
 
     private void refreshList(String selectId) {
-        String f = filterField.getText().trim().toLowerCase(Locale.ROOT);
-        ignoreSelection = true;
-        try {
-            listModel.clear();
-            int sel = -1;
-            for (RequestModel r : store.all()) {
-                if (f.isEmpty() || r.name.toLowerCase(Locale.ROOT).contains(f)
-                        || r.url.toLowerCase(Locale.ROOT).contains(f)
-                        || r.method.toLowerCase(Locale.ROOT).startsWith(f)) {
-                    listModel.addElement(r);
-                    if (r.id.equals(selectId)) {
-                        sel = listModel.size() - 1;
-                    }
-                }
-            }
-            if (sel >= 0) {
-                requestList.setSelectedIndex(sel);
-                requestList.ensureIndexIsVisible(sel);
-            } else {
-                requestList.clearSelection();
-            }
-        } finally {
-            ignoreSelection = false;
-        }
+        requestTree.reload(selectId, filterField.getText());
     }
 
-    private void onListSelection() {
-        RequestModel selected = requestList.getSelectedValue();
-        if (selected == null || selected.id.equals(currentId)) {
+    /** Called by the tree when the user clicks a request. */
+    private void onRequestSelected(RequestModel selected) {
+        if (selected.id.equals(currentId)) {
             return;
         }
         if (!confirmDiscard()) {
@@ -884,6 +883,7 @@ public class MainFrame extends JFrame {
         }
         RequestModel requestModel = new RequestModel();
         requestModel.insecure = true;
+        requestModel.folderId = requestTree.contextFolderId(); // created in the selected folder
         loadEditor(requestModel);
         refreshList(null);
         nameField.requestFocusInWindow();
@@ -920,6 +920,7 @@ public class MainFrame extends JFrame {
         RequestModel copy = r.copy();
         copy.id = java.util.UUID.randomUUID().toString();
         copy.name = r.name + " (copy)";
+        copy.folderId = store.folderOf(r.id).isEmpty() ? editorFolderId : store.folderOf(r.id);
         try {
             store.save(copy);
         } catch (Exception ex) {
@@ -948,7 +949,12 @@ public class MainFrame extends JFrame {
     }
 
     private void deleteRequest() {
-        RequestModel sel = requestList.getSelectedValue();
+        FolderModel folder = requestTree.selectedFolder();
+        if (folder != null) {
+            deleteFolder(folder);
+            return;
+        }
+        RequestModel sel = requestTree.selectedRequest();
         String id = sel != null ? sel.id : currentId;
         RequestModel target = id == null ? null : store.find(id);
         if (target == null) {
@@ -961,18 +967,25 @@ public class MainFrame extends JFrame {
         if (ok != JOptionPane.OK_OPTION) {
             return;
         }
+        int idx = 0;
+        List<RequestModel> before = requestTree.requestsInOrder();
+        for (int i = 0; i < before.size(); i++) {
+            if (before.get(i).id.equals(target.id)) {
+                idx = Math.max(0, i - 1);
+            }
+        }
         try {
             store.delete(target.id);
         } catch (Exception ex) {
             error("Could not delete the request", ex);
             return;
         }
-        int idx = Math.max(0, requestList.getSelectedIndex() - 1);
         refreshList(null);
         if (target.id.equals(currentId)) {
             savedSnapshot = ""; // allow switching without prompt
-            if (!listModel.isEmpty()) {
-                RequestModel next = listModel.get(Math.min(idx, listModel.size() - 1));
+            List<RequestModel> after = requestTree.requestsInOrder();
+            if (!after.isEmpty()) {
+                RequestModel next = after.get(Math.min(idx, after.size() - 1));
                 loadEditor(next);
                 refreshList(next.id);
             } else {
@@ -981,6 +994,81 @@ public class MainFrame extends JFrame {
         } else {
             refreshList(currentId);
         }
+    }
+
+    private void newFolder() {
+        String name = JOptionPane.showInputDialog(this, "Folder name:", "New folder");
+        if (name == null || name.trim().isEmpty()) {
+            return;
+        }
+        try {
+            store.addFolder(name.trim(), requestTree.contextFolderId());
+        } catch (Exception ex) {
+            error("Could not create the folder", ex);
+            return;
+        }
+        refreshList(currentId);
+    }
+
+    private void renameFolder() {
+        FolderModel folder = requestTree.selectedFolder();
+        if (folder == null) {
+            return;
+        }
+        String name = JOptionPane.showInputDialog(this, "Folder name:", folder.name);
+        if (name == null || name.trim().isEmpty()) {
+            return;
+        }
+        try {
+            store.renameFolder(folder.id, name.trim());
+        } catch (Exception ex) {
+            error("Could not rename the folder", ex);
+            return;
+        }
+        refreshList(currentId);
+    }
+
+    private void deleteFolder(FolderModel folder) {
+        int n = store.countRequests(folder.id);
+        int ok = JOptionPane.showConfirmDialog(this, "Delete the folder \"" + folder.name + "\""
+                        + (n == 0 ? "?" : " and the " + n + " request" + (n == 1 ? "" : "s") + " it contains?"),
+                "Delete folder", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.OK_OPTION) {
+            return;
+        }
+        boolean editedGone = currentId != null && isInside(store.folderOf(currentId), folder.id);
+        try {
+            store.deleteFolder(folder.id);
+        } catch (Exception ex) {
+            error("Could not delete the folder", ex);
+            return;
+        }
+        refreshList(null);
+        if (editedGone) {
+            savedSnapshot = ""; // allow switching without prompt
+            List<RequestModel> after = requestTree.requestsInOrder();
+            if (!after.isEmpty()) {
+                loadEditor(after.get(0));
+                refreshList(after.get(0).id);
+            } else {
+                loadEditor(new RequestModel());
+            }
+        } else {
+            refreshList(currentId);
+        }
+    }
+
+    /** True when {@code folderId} is {@code ancestorId} or one of its descendants. */
+    private boolean isInside(String folderId, String ancestorId) {
+        FolderModel f = store.findFolder(folderId);
+        int guard = 0;
+        while (f != null && guard++ < 1000) {
+            if (f.id.equals(ancestorId)) {
+                return true;
+            }
+            f = store.findFolder(f.parentId);
+        }
+        return false;
     }
 
     private void sendOrCancel() {
@@ -1118,6 +1206,7 @@ public class MainFrame extends JFrame {
         // keep identity of the edited request; the user saves explicitly
         RequestModel imported = res.request;
         imported.id = currentId;
+        imported.folderId = editorFolderId;
         String currentName = nameField.getText().trim();
         if (!currentName.isEmpty() && !currentName.equals(new RequestModel().name)) {
             imported.name = currentName;
@@ -1131,6 +1220,29 @@ public class MainFrame extends JFrame {
             curlMessage.setText("Imported. Review the request and click Save to keep it.");
         } else {
             curlMessage.setText("<html>Imported with warnings:<br>" + String.join("<br>", escape(res.warnings)) + "</html>");
+        }
+    }
+
+    private static String clipboardText() {
+        try {
+            return (String) Toolkit.getDefaultToolkit().getSystemClipboard().getData(DataFlavor.stringFlavor);
+        } catch (Exception ex) {
+            return null; // no text in the clipboard
+        }
+    }
+
+    /** True for text such as "curl https://..." (case-insensitive, "curl" followed by whitespace). */
+    private static boolean looksLikeCurl(String text) {
+        return text.matches("(?is)\\s*curl\\s.*");
+    }
+
+    /** Same as the "Import from cURL" button of the cURL tab, for a command pasted in the URL field. */
+    private void importCurlFromUrlField(String command) {
+        curlArea.setText(command.trim().replaceFirst("(?i)^curl", "curl")); // the converter expects lower case
+        importCurl();
+        // success: stay on the current tab; otherwise show the cURL tab where the error / warnings are reported
+        if (!curlMessage.getText().startsWith("Imported.")) {
+            requestTabs.setSelectedIndex(4);
         }
     }
 
@@ -1282,37 +1394,5 @@ public class MainFrame extends JFrame {
 
     private static String shortcutText(int key) {
         return (isMac() ? "⌘" : "Ctrl+") + KeyEvent.getKeyText(key);
-    }
-
-    /** List renderer showing a colored method badge before the request name. */
-    private static final class RequestRenderer extends DefaultListCellRenderer {
-        @Override
-        public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean selected, boolean focus) {
-            super.getListCellRendererComponent(list, value, index, selected, focus);
-            RequestModel r = (RequestModel) value;
-            String color = methodColor(r.method);
-            String name = r.name.replace("&", "&amp;").replace("<", "&lt;");
-            String url = r.url.replace("&", "&amp;").replace("<", "&lt;");
-            if (url.length() > 60) {
-                url = url.substring(0, 57) + "…";
-            }
-            setText("<html><b><font color='" + (selected ? "white" : color) + "'>" + r.method
-                    + "</font></b>&nbsp;" + name + "<br><font size='-2' color='" + (selected ? "white" : "gray") + "'>"
-                    + url + "</font></html>");
-            setToolTipText(r.method + " " + r.url);
-            setBorder(BorderFactory.createEmptyBorder(3, 4, 3, 4));
-            return this;
-        }
-
-        private static String methodColor(String m) {
-            switch (m == null ? "" : m.toUpperCase(Locale.ROOT)) {
-                case "GET": return "#1e8c3c";
-                case "POST": return "#c87800";
-                case "PUT": return "#1e64c8";
-                case "PATCH": return "#8c3cb4";
-                case "DELETE": return "#c82828";
-                default: return "#666666";
-            }
-        }
     }
 }

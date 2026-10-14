@@ -13,7 +13,9 @@ public class RequestModel {
 
     public enum HttpVersion { AUTO, HTTP_1_1, HTTP_2 }
 
+    /** Forced TLS protocol ("" = negotiated, else TLSv1 / TLSv1.1 / TLSv1.2 / TLSv1.3). */
     public String tlsVersion = "";
+    /** Address (or host name) the URL's host is resolved to; "" = use the OS DNS. */
     public String hostOverride = "";
 
     public enum BodyType {
@@ -33,6 +35,8 @@ public class RequestModel {
     }
 
     public String id = UUID.randomUUID().toString();
+    /** Folder containing this request ("" = top level). Managed by the store / the request tree. */
+    public String folderId = "";
     public String name = "New request";
     public String method = "GET";
     public String url = "";
@@ -112,6 +116,7 @@ public class RequestModel {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", id);
         m.put("name", name);
+        m.put("folderId", folderId);
         m.put("method", method);
         m.put("url", url);
         List<Object> hs = new ArrayList<>();
@@ -143,6 +148,8 @@ public class RequestModel {
         m.put("followRedirects", followRedirects);
         m.put("insecure", insecure);
         m.put("httpVersion", httpVersion.name());
+        m.put("tlsVersion", tlsVersion);
+        m.put("hostOverride", hostOverride);
         m.put("proxyMode", proxyMode.name());
         m.put("proxyHost", proxyHost);
         m.put("proxyPort", proxyPort);
@@ -156,6 +163,7 @@ public class RequestModel {
         RequestModel r = new RequestModel();
         r.id = str(m, "id", r.id);
         r.name = str(m, "name", r.name);
+        r.folderId = str(m, "folderId", "");
         r.method = str(m, "method", r.method);
         r.url = str(m, "url", r.url);
         Object hs = m.get("headers");
@@ -200,6 +208,8 @@ public class RequestModel {
             r.proxyMode = ProxyMode.valueOf(str(m, "proxyMode", r.proxyMode.name()));
         } catch (IllegalArgumentException ignored) {
         }
+        r.tlsVersion = str(m, "tlsVersion", "");
+        r.hostOverride = str(m, "hostOverride", "");
         r.proxyHost = str(m, "proxyHost", "");
         r.proxyPort = integer(m, "proxyPort", r.proxyPort);
         r.proxyUser = str(m, "proxyUser", "");

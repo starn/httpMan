@@ -20,6 +20,10 @@ public final class HttpMan {
         System.setProperty("jdk.http.auth.proxying.disabledSchemes", "");
         System.setProperty("jdk.httpclient.allowRestrictedHeaders", "host"); // let the user override Host (JDK 12+)
 
+        // No JVM DNS cache: the "Override host" setting must apply immediately (must run before the first lookup).
+        java.security.Security.setProperty("networkaddress.cache.ttl", "0");
+        java.security.Security.setProperty("networkaddress.cache.negative.ttl", "0");
+
         System.setProperty("apple.laf.useScreenMenuBar", "true");
         System.setProperty("apple.awt.application.name", "HttpMan");
 
